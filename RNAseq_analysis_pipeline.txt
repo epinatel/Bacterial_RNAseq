@@ -1,0 +1,140 @@
+################
+#INPUT REQUIRED#
+################
+
+#read file: inputA.fastq.gz
+#genome sequence: genomeX.fna
+#refseq genome annotation table:genomeX_feature_table.txt.gz 
+
+################
+#INPUT PARSING #
+################
+
+awk 'BEGIN{FS="\t";OFS="\t"}{if ($2=="protein_coding") print $7,$8,$9,$17,$2,$10}' genomeX_feature_table.txt >genomeX2.CDS.bed 
+awk 'BEGIN{FS="\t";OFS="\t"}{if ($2=="tRNA") print $7,$8,$9,$17,$2,$10}' genomeX_feature_table.txt >genomeX2.tRNA.bed
+awk 'BEGIN{FS="\t";OFS="\t"}{if ($2=="rRNA") print $7,$8,$9,$17,$2,$10}' genomeX_feature_table.txt >genomeX2.rRNA.bed
+awk 'BEGIN{FS="\t";OFS="\t"}{if (NR!=1 && $2!="rRNA" && $2!="tRNA" && $2!="protein_coding" && $2!="") print $7,$8,$9,$17,$2,$10}' genomeX_feature_table.txt >genomeX2.otherRNA.bed
+
+
+######################################################################
+#Checkpoint 1 FastQC evaluation and read trimming (only if necessary)#
+######################################################################
+fastqc inputA.fq.gz
+java -jar trimmomatic-0.36.jar SE -phred33 inputA.fq.gz SampleA.fq.gz ILLUMINACLIP:<full path to the selected adapter files within trimmomatic directory>:2:30:10 CROP:X MINLEN:Z 
+#or
+java -jar trimmomatic-0.36.jar SE -phred33 inputA.fq.gz SampleA.fq.gz ILLUMINACLIP:<full path to the selected adapter files within trimmomatic directory>:2:30:10 MINLEN:Z SLIDINGWINDOW:A:B 
+
+###########################################
+#Step 1:read alignment and qual. filtering#
+###########################################
+bowtie2-build <genomeX.fna> <path to output directory / indexbasename > 
+bowtie2 --end-to-end -q --phred33 --very-sensitive -x <path to genome index directory / index basename> -U <SampleA.fastq.gz or comma separated list of read files> -S SampleA.sam 2> SampleA.bowtie.log 
+
+#selection of HQ reads
+samtools view -S -h -F4 -q30 SampleA.sam | awk 'BEGIN{OFS="\t";FS="\t"}{split($12,a,":"); if (a[3]>-15) print $0}' - | samtools view -S -h -b - >SampleA.HQ.unsorted.bam 
+samtools sort SampleA.HQ.unsorted.bam SampleA.HQ
+rm SampleA.HQ.unsorted.bam
+
+## selection of HQ reads including multimapping
+cat <(samtools view -S -H SampleA.sam) <( samtools view -S -F4 -q30 SampleA.sam | grep -v "XS:i" - | awk 'BEGIN{OFS="\t";FS="\t"}{split($12,a,":"); if (a[3]>-15) print $0}' -) <(samtools view -S SampleA.sam |grep "XS:i" - |awk 'BEGIN{OFS="\t";FS="\t"}{split($12,a,":"); if (a[3]>=-15) print $0}' -) | samtools view -S -h -b - >SampleA.duplunsorted.HQ.bam
+samtools sort SampleA.duplunsorted.HQ.bam SampleA.dupl.HQ
+rm SampleA.duplunsorted.HQ.bam
+
+###################################
+#Checkpoint 2 Alignment assessment#
+###################################
+samtools flagstat SampleA.HQ.bam > SampleA.HQ.bam.stats
+cat SampleA.bowtie.log >SampleA_quality_stats
+awk 'BEGIN{OFS="\t"}{if (NR==3) print "Number HQ reads",$1 }' SampleA.HQ.bam.stats >>SampleA_quality_stats
+
+################################################## 
+##Step 2:index generation for reads visualization#
+##################################################   
+samtools view -S -h -b -F4 SampleA.sam | samtools sort - >SampleA.bam
+samtools index SampleA.bam
+samtools index SampleA.HQ.bam
+
+#################################################################################
+#Check point 3 Relative rRNA percentage and global strand specificity evaluation#
+#################################################################################
+
+bedtools bamtobed -i SampleA.bam > SampleA.bed
+TRNA_READS_COVERAGE=`bedtools intersect -f 0.5 -b genomeX_tRNA.bed -a SampleA.bed | cut -f 4 | sort | uniq | wc -l`
+RRNA_READS_COVERAGE=`bedtools intersect -f 0.5 -b genomeX_rRNA.bed -a SampleA.bed | cut -f 4 | sort | uniq | wc -l`
+MRNA_READS_COVERAGE=`bedtools intersect -f 0.5 -b genomeX_mRNA.bed -a SampleA.bed | cut -f 4 | sort | uniq | wc -l`
+samtools flagstat SampleA.bam > SampleA.bam.stats
+BAM_READS=`awk '{if (NR==3) print $1 }' SampleA.bam.stats`
+PERC_RRNA_READS_COVERAGE=`echo "$RRNA_READS_COVERAGE $BAM_READS" |awk 'BEGIN{OFS="\t"}{print "rRNA relative percentage",$1/$2*100}'`
+PERC_MRNA_READS_COVERAGE=`echo "$MRNA_READS_COVERAGE $BAM_READS" |awk 'BEGIN{OFS="\t"}{ print "mRNA relative percentage",$1/$2*100}'`
+PERC_TRNA_READS_COVERAGE=`echo "$TRNA_READS_COVERAGE $BAM_READS" |awk 'BEGIN{OFS="\t"}{ print "tRNA relative percentage",$1/$2*100}'` 
+
+cat genomeX_mRNA.bed genomeX_rRNA.bed genomeX_tRNA.bed genomeX_otherRNA.bed >genomeX_AllTranscripts.bed
+
+ALL_SS_COVERAGE=`bedtools intersect -f 0.5 -a SampleA.bed -b genomeX_AllTranscripts.bed -wb | awk 'BEGIN{FS="\t";OFS="\t";SS=0;OS=0;tot=0}{if ($6==$12){SS+=1}else{OS+=1};tot=tot+1}END{print "ALL:Strand
+Specific =\t"(SS/tot)*100"\nALL:Opposite Strand =\t"(OS/tot)*100"\nALL:Tot Reads on TX =\t"tot}'`
+MRNA_SS_COVERAGE=`bedtools intersect -f 0.5 -a SampleA.bed -b genomeX_mRNA.bed -wb | awk 'BEGIN{FS="\t";OFS="\t";SS=0;OS=0;tot=0}{if ($6==$12){SS+=1}else{OS+=1};tot=tot+1}END{print "mRNA:Strand Specific =\t"(SS/tot)*100"\nmRNA:Opposite Strand =\t"(OS/tot)*100"\nmRNA:Tot Reads on TX =\t"tot}' `
+RRNA_SS_COVERAGE=`bedtools intersect -f 0.5 -a SampleA.bed -b genomeX_rRNA.bed -wb | awk 'BEGIN{FS="\t";OFS="\t";SS=0;OS=0;tot=0}{if ($6==$12){SS+=1}else{OS+=1};tot=tot+1}END{print "rRNA:Strand Specific =\t"(SS/tot)*100"\nrRNA:Opposite Strand =\t"(OS/tot)*100"\nrRNA:Tot Reads on TX =\t"tot}' `
+TRNA_SS_COVERAGE=`bedtools intersect -f 0.5 -a SampleA.bed -b genomeX_tRNA.bed -wb | awk 'BEGIN{FS="\t";OFS="\t";SS=0;OS=0;tot=0}{if ($6==$12){SS+=1}else{OS+=1};tot=tot+1}END{print "tRNA:Strand Specific =\t"(SS/tot)*100"\ntRNA:Opposite Strand =\t"(OS/tot)*100"\ntRNA:Tot Reads on TX =\t"tot}' `
+
+###############################################
+#Step 3: Strand specific gene count production#
+############################################### 
+cat genomeX_mRNA.bed >Interesting_genes.bed
+bedtools intersect -abam SampleA.HQ.bam -b Interesting_genes.bed -s > SampleA.HQ_SS.bam 
+bedtools bamtobed -i SampleA.HQ_SS.bam > SampleA.HQ_SS.bed
+bedtools intersect -b Interesting_genes.bed -a SampleA.HQ_SS.bed -f 0.5 | bedtools coverage -b stdin -a Interesting_genes.bed > SampleA.genes_coverage.bed
+cut -f 4,7 SampleA.genes_coverage.bed > SampleA.read_count 
+#RPKM genecount production
+MAPPED_READS=`wc -l SampleA.HQ_SS.bed| awk '{print $1}' -`
+cat <(awk -v mapped="$MAPPED_READS" 'BEGIN{OFS="\t"}{if ($7>0){print $4,$7*1000000000/($9*mapped)}else{print $4,0}}' SampleA.genes_coverage.bed | sort ) > SampleA.genes_coverage.RPKM 
+
+#########################################
+#Check point 4 genes coverage evaluation#
+#########################################
+HQ_READS=`awk 'BEGIN{OFS="\t"}{if (NR==3) print "Number HQ reads",$1 }' SampleA.HQ.bam.stats`
+ZERO_COV=`awk 'BEGIN{FS="\t";OFS="\t";c=0}{if ($2>0)c=c+1}END{print "Percentage of not expressed genes",c/NR*100}' SampleA.read_count`
+DHT_COV=`awk -v dth=1 'BEGIN{FS="\t";OFS="\t";c=0}{if ($2>dth)c=c+1}END{print "Percentage of genes covered at least by one read",c/NR*100}' SampleA.read_count`
+NUMBER_OF_MRNA=`wc -l SampleA.read_count | cut -f1 -d " "`
+PERCENTILE_10=`echo $NUMBER_OF_MRNA-\($NUMBER_OF_MRNA/10\) | bc`
+PERCENTILE_10_COV=`sort -k2,2rn SampleA.read_count | awk -v pos=$PERCENTILE_10 'BEGIN{FS="\t";OFS="\t"}{if (NR==pos)print "Reads covering 90 percent of the genes",$2}'`
+COV_50=`mawk 'BEGIN{FS="\t";OFS="\t";c=0}{if ($10>0.5) c=c+1}END{print "Percentage of genes covered for at half of their lenght",c/NR*100}' SampleA.genes_coverage.bed`
+
+printf "$PERC_MRNA_READS_COVERAGE\n$PERC_RRNA_READS_COVERAGE\n$PERC_TRNA_READS_COVERAGE\n$ALL_SS_COVERAGE\n$MRNA_SS_COVERAGE\n$RRNA_SS_COVERAGE\n$TRNA_SS_COVERAGE\n$ZERO_COV\n$DHT_COV\n$PERCENTILE_10_COV\n$COV_50" >>SampleA_quality_stats
+
+####################################
+#Step 4a: gene counts normalization#
+####################################
+R
+library("DESeq2")
+library("ggplot2")
+Treated_rep_A <- read.table("/path to read/Sample1.read_count",row.names=1)
+Treated_rep_B <-read.table("/path to read/Sample2.read_count",row.names=1)
+Control_rep_A <-read.table("/path to read/Sample3.read_count",row.names=1)
+Control_rep_B <-read.table("/path to read/Sample4.read_count",row.names=1) 
+My_experiment<-cbind(Treated_rep_A,Treated_rep_B,Control_rep_A,Control_rep_B)
+colnames(My_experiment)<-c("Treated_rep_A","Treated_rep_B","Control_rep_A","Control_rep_B")
+colData_My_experiment = data.frame(row.names =colnames(My_experiment), replica=c("A","B","A","B"),condition=c("Treated","Treated","Untreated","Untreated"))
+dds <- DESeqDataSetFromMatrix(countData = My_experiment ,colData= colData_My_experiment, design = ~ condition) 
+
+######################################
+#Check point 5 Sample reproducibility#
+######################################
+rld <- rlogTransformation(dds, blind=TRUE)
+data <- plotPCA(rld, intgroup=c("condition", "replica"),returnData=TRUE) 
+percentVar <- round(100 * attr(data,"percentVar")) 
+pdf("PCA_samples")
+ggplot(data, aes(PC1, PC2, color=condition, shape=replica)) + geom_point(size=3) + xlab(paste0("PC1:",percentVar[1],"% variance")) + ylab(paste0 ("PC2:",percentVar[2],"% variance")) 
+dev.off()
+
+##################################
+#Step 4b: differential expression#
+##################################  
+dds$condition <- relevel(dds$condition, ref="untreated")
+dds2 <- DESeq(dds)
+res <- results(dds2) 
+write.csv(as.data.frame(res),file="condition_treated_VS_untreated_results.csv") 
+write.csv(counts(dds,normalized=TRUE),file="normalized_counts.csv") 
+
+#In the most recent version of the package not shrinked FC can be obtained as follows 
+resMLE <- results(dds, addMLE=TRUE)
+write.csv(as.data.frame(resMLE),file="condition_treated_VS_untreated_resultswhithMLE.csv")
