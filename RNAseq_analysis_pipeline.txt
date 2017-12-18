@@ -82,7 +82,7 @@ TRNA_SS_COVERAGE=`bedtools intersect -f 0.5 -a SampleA.bed -b genomeX_tRNA.bed -
 cat genomeX_mRNA.bed >Interesting_genes.bed
 bedtools intersect -abam SampleA.HQ.bam -b Interesting_genes.bed -s > SampleA.HQ_SS.bam 
 bedtools bamtobed -i SampleA.HQ_SS.bam > SampleA.HQ_SS.bed
-bedtools intersect -b Interesting_genes.bed -a SampleA.HQ_SS.bed -f 0.5 | bedtools coverage -b stdin -a Interesting_genes.bed > SampleA.genes_coverage.bed
+bedtools intersect -b Interesting_genes.bed -a SampleA.HQ_SS.bed -f 0.5 -s | bedtools coverage -b stdin -a Interesting_genes.bed -s > SampleA.genes_coverage.bed
 cut -f 4,7 SampleA.genes_coverage.bed > SampleA.read_count 
 #RPKM genecount production
 MAPPED_READS=`wc -l SampleA.HQ_SS.bed| awk '{print $1}' -`
